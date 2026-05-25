@@ -5,6 +5,15 @@ import { traeBadgePlugin } from 'vite-plugin-trae-solo-badge';
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: './',
+  build: {
+    assetsDir: 'assets',
+    rollupOptions: {
+      output: {
+        manualChunks: undefined,
+      },
+    },
+  },
   plugins: [
     react({
       babel: {
@@ -27,7 +36,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3002',
+        target: 'http://localhost:3005',
         changeOrigin: true,
         secure: false,
         configure: (proxy, _options) => {

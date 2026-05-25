@@ -15,12 +15,15 @@ router.get('/image', async (req, res) => {
     const allowedDomains = [
       'instagram.com',
       'fbcdn.net',
-      'cdninstagram.com'
+      'cdninstagram.com',
+      'tiktokcdn.com',
+      'tiktokcdn-us.com',
+      'tiktokcdn-eu.com'
     ]
     
     const urlObj = new URL(url)
     const isAllowed = allowedDomains.some(domain => 
-      urlObj.hostname.includes(domain)
+      urlObj.hostname === domain || urlObj.hostname.endsWith(`.${domain}`)
     )
     
     if (!isAllowed) {

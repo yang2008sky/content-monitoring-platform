@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useProjectStore } from '../store/projectStore'
 import { 
   ArrowLeft, Plus, Search, Download, Upload, 
-  Eye, Heart, MessageCircle, Share, BarChart3, 
+  Eye, Heart, MessageCircle, Share, BarChart3, Users, Play,
   Youtube, Instagram, ExternalLink,
   Edit, Trash2, Grid3X3, List, Twitter, RefreshCw, ChevronDown, Check
 } from 'lucide-react'
@@ -99,7 +99,7 @@ const MultiPlatformSelector = ({
   }
 
   return (
-    <div className="relative platform-selector">
+    <div className="relative z-50 platform-selector">
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
@@ -110,7 +110,7 @@ const MultiPlatformSelector = ({
       </button>
       
       {isOpen && (
-        <div className="absolute z-10 mt-1 w-full bg-white border border-gray-300 rounded-md shadow-lg">
+        <div className="absolute z-50 mt-1 w-full bg-white border border-gray-300 rounded-md shadow-lg">
           <div className="py-1">
             {platforms.map((platform) => {
               const isSelected = selectedPlatforms.includes(platform.value)
@@ -155,11 +155,65 @@ const getVideoType = (platform: string, url: string): 'long' | 'short' => {
       return url.includes('/reel/') ? 'short' : 'long'
     case 'twitter':
     case 'x':
-      // Twitter 视频通常是短视频
-      return 'short'
+      return 'long'
     default:
       return 'long'
   }
+}
+
+const getDisplayThumbnailUrl = (url?: string | null) => {
+  if (!url) return ''
+  if (url.startsWith('/api/proxy/image')) return url
+
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname.includes('tiktokcdn')) {
+      return `/api/proxy/image?url=${encodeURIComponent(url)}`
+    }
+  } catch {}
+
+  return url
+}
+
+const useResolvedThumbnailUrl = (content: Content) => {
+  const [thumbnailUrl, setThumbnailUrl] = useState(() => getDisplayThumbnailUrl(content.thumbnail_url))
+
+  useEffect(() => {
+    let mounted = true
+    const initialUrl = getDisplayThumbnailUrl(content.thumbnail_url)
+    setThumbnailUrl(initialUrl)
+
+    const rawUrl = content.thumbnail_url || ''
+    const shouldRefreshTikTokThumbnail =
+      content.post_url.includes('tiktok.com') &&
+      (rawUrl.includes('.heic') || rawUrl.includes('tiktokcdn-us.com') || !rawUrl)
+
+    if (!shouldRefreshTikTokThumbnail) {
+      return () => { mounted = false }
+    }
+
+    const fetchFreshThumbnail = async () => {
+      try {
+        const res = await fetch('/api/content/fetch-video', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': '635595c4-4567-4d44-a21d-81d7a46d785c'
+          },
+          body: JSON.stringify({ url: content.post_url })
+        })
+        const result = await res.json()
+        if (mounted && result.success && result.data?.thumbnail_url) {
+          setThumbnailUrl(getDisplayThumbnailUrl(result.data.thumbnail_url))
+        }
+      } catch {}
+    }
+
+    fetchFreshThumbnail()
+    return () => { mounted = false }
+  }, [content.thumbnail_url, content.post_url])
+
+  return thumbnailUrl
 }
 
 // 封面图组件 - 根据视频类型显示不同比例
@@ -170,9 +224,10 @@ const VideoThumbnail = ({
 }: { 
   content: Content, 
   className?: string,
-  size?: "small" | "medium" | "large" | "table"
+  size?: "small" | "medium" | "large" | "table" | "card"
 }) => {
   const videoType = getVideoType(content.platform, content.post_url)
+  const thumbnailUrl = useResolvedThumbnailUrl(content)
   
   // 根据视频类型和尺寸确定样式
   const getAspectRatio = () => {
@@ -198,6 +253,8 @@ const VideoThumbnail = ({
       return videoType === 'short' ? 'w-12 h-20' : 'w-20 h-12'
     } else if (size === 'large') {
       return videoType === 'short' ? 'w-48 h-80' : 'w-80 h-48'
+    } else if (size === 'card') {
+      return videoType === 'short' ? 'w-24 h-40' : 'w-40 h-24'
     } else {
       return videoType === 'short' ? 'w-32 h-56' : 'w-56 h-32'
     }
@@ -205,11 +262,11 @@ const VideoThumbnail = ({
 
   return (
     <div className={`${getSizeClasses()} ${getAspectRatio()} bg-gray-200 rounded overflow-hidden flex-shrink-0 relative ${className}`}>
-      {content.thumbnail_url ? (
+      {thumbnailUrl ? (
         <>
           <img
             className="h-full w-full object-cover"
-            src={content.thumbnail_url}
+            src={thumbnailUrl}
             alt={content.title}
             onError={(e) => {
               const target = e.target as HTMLImageElement;
@@ -231,6 +288,89 @@ const VideoThumbnail = ({
       )}
       
 
+    </div>
+  )
+}
+
+// 卡片预览组件：使用封面图做模糊背景
+const CardPreview = ({ content }: { content: Content }) => {
+  const [thumbError, setThumbError] = useState(false)
+  const thumbnailUrl = useResolvedThumbnailUrl(content)
+  const hasThumb = !!thumbnailUrl && !thumbError
+  const [durationSeconds, setDurationSeconds] = useState<number | null>(null)
+
+  useEffect(() => {
+    let mounted = true
+    const fetchDuration = async () => {
+      try {
+        const res = await fetch('/api/content/fetch-video', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': '635595c4-4567-4d44-a21d-81d7a46d785c'
+          },
+          body: JSON.stringify({ url: content.post_url })
+        })
+        const result = await res.json()
+        if (mounted && result.success && result.data?.duration) {
+          setDurationSeconds(result.data.duration)
+        }
+      } catch {}
+    }
+    fetchDuration()
+    return () => { mounted = false }
+  }, [content.post_url])
+
+  const formatDuration = (sec: number) => {
+    const m = Math.floor(sec / 60)
+    const s = Math.floor(sec % 60)
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  }
+
+  const realPlatform = detectRealPlatformFromUrl(content.post_url)
+  return (
+    <div className={`relative w-full aspect-square overflow-hidden rounded-t-lg`}>
+      {hasThumb ? (
+        <img
+          src={thumbnailUrl}
+          alt={content.title}
+          className="absolute inset-0 w-full h-full object-cover blur-sm scale-105"
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = 'none'
+            setThumbError(true)
+          }}
+        />
+      ) : (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-200 text-gray-500 text-xs">
+          封面
+        </div>
+      )}
+      <div className="absolute inset-0 bg-gradient-to-b from-black/10 to-transparent" />
+      {!hasThumb && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-200 text-gray-500 text-xs">
+          封面
+        </div>
+      )}
+      <div className="absolute top-2 left-2 z-20">
+        <StatusBadge status={content.status} />
+      </div>
+      {hasThumb ? (
+        <img
+          src={thumbnailUrl}
+          alt={content.title}
+          className="relative z-10 w-full h-full object-contain"
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = 'none'
+            setThumbError(true)
+          }}
+        />
+      ) : null}
+      {durationSeconds !== null && (
+        <div className="absolute bottom-2 right-2 z-20 px-2 py-1 bg-black/70 text-white text-xs rounded-full flex items-center space-x-1">
+          <Play className="h-3 w-3" />
+          <span>{formatDuration(durationSeconds)}</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -314,6 +454,7 @@ const AddContentModal = ({ isOpen, onClose, projectId, onContentAdded }: {
   const [batchLinks, setBatchLinks] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [batchResult, setBatchResult] = useState<any | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -417,13 +558,13 @@ const AddContentModal = ({ isOpen, onClose, projectId, onContentAdded }: {
         console.log('批量添加 - 使用的项目ID:', projectId)
         console.log('批量添加 - 链接数量:', links.length)
 
-        const response = await fetch(`/api/contents/${projectId}/batch-links`, {
+        const response = await fetch(`/api/content/batch-add`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-user-id': '635595c4-4567-4d44-a21d-81d7a46d785c',
           },
-          body: JSON.stringify({ links })
+          body: JSON.stringify({ project_id: projectId, links })
         })
 
         if (!response.ok) {
@@ -436,11 +577,18 @@ const AddContentModal = ({ isOpen, onClose, projectId, onContentAdded }: {
         const result = await response.json()
 
         if (result.success) {
+          const data = result.data || {}
+          setBatchResult(data)
           if (onContentAdded) {
             onContentAdded()
           }
-          onClose()
-          setBatchLinks('')
+          
+          // 如果全部成功，显示成功提示
+          if (!data.failed_count || data.failed_count === 0) {
+            // 使用 alert 或者 toast 提示用户
+            // 这里我们暂时不自动关闭，让用户看到结果
+            // 或者我们可以显示一个短暂的成功状态
+          }
         } else {
           setError(result.error || '批量添加失败')
         }
@@ -578,7 +726,7 @@ const AddContentModal = ({ isOpen, onClose, projectId, onContentAdded }: {
                       className="w-full h-40 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-orange-500 focus:border-orange-500 resize-none"
                     />
                     <div className="mt-2 text-xs text-gray-500">
-                      一次最多输入500条链接，当前已输入 {batchLinks.trim() ? batchLinks.trim().split('\n').filter(link => link.trim()).length : 0} 条
+                      一次最多输入500条链接，当前已输入 {batchLinks.trim() ? batchLinks.trim().split('\n').filter(link => link.trim()).length : 0} 条 (自动忽略空行)
                     </div>
                   </div>
                 </div>
@@ -591,21 +739,66 @@ const AddContentModal = ({ isOpen, onClose, projectId, onContentAdded }: {
               </div>
             )}
 
+            {activeTab === 'batch' && batchResult && (
+              <div className={`border rounded-md p-3 ${
+                !batchResult.failed_count ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'
+              }`}>
+                <p className={`text-sm ${!batchResult.failed_count ? 'text-green-700 font-medium' : 'text-gray-700'}`}>
+                  批量添加完成：成功 {batchResult.success_count || 0} 条，失败 {batchResult.failed_count || 0} 条
+                </p>
+                {Array.isArray(batchResult.failed_rows) && batchResult.failed_rows.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-sm font-medium text-red-600">未导入成功的链接：</p>
+                    <ul className="mt-1 space-y-1 max-h-40 overflow-y-auto">
+                      {batchResult.failed_rows.map((row: any, idx: number) => (
+                        <li key={idx} className="text-xs text-gray-700">
+                          {row.index ? `#${row.index} ` : ''}{row.link || row.data?.链接 || row.data?.link || ''} — {row.error}
+                        </li>
+                      ))}
+                    </ul>
+                    <button
+                      type="button"
+                      className="mt-2 text-xs text-blue-600 hover:text-blue-700"
+                      onClick={() => {
+                        const text = batchResult.failed_rows.map((row: any) => row.link || row.data?.链接 || row.data?.link || '').filter(Boolean).join('\n')
+                        navigator.clipboard.writeText(text)
+                      }}
+                    >
+                      复制失败链接
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex space-x-3 pt-4">
               <button
                 type="button"
-                onClick={onClose}
-                className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-md hover:bg-gray-200"
+                onClick={() => {
+                  onClose()
+                  // 如果是批量添加且已完成，关闭时清空
+                  if (activeTab === 'batch' && batchResult && !batchResult.failed_count) {
+                    setBatchLinks('')
+                    setBatchResult(null)
+                  }
+                }}
+                className={`flex-1 px-4 py-2 text-sm font-medium rounded-md border ${
+                  activeTab === 'batch' && batchResult && !batchResult.failed_count
+                    ? 'text-white bg-green-600 hover:bg-green-700 border-transparent'
+                    : 'text-gray-700 bg-gray-100 border-gray-300 hover:bg-gray-200'
+                }`}
               >
-                取消
+                {activeTab === 'batch' && batchResult && !batchResult.failed_count ? '完成并关闭' : '取消'}
               </button>
-              <button
-                type="submit"
-                disabled={submitting}
-                className="flex-1 px-4 py-2 text-sm font-medium text-white bg-orange-500 border border-transparent rounded-md hover:bg-orange-600 disabled:opacity-50"
-              >
-                {submitting ? '处理中...' : '确认'}
-              </button>
+              {(!batchResult || batchResult.failed_count > 0 || activeTab !== 'batch') && (
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-orange-500 border border-transparent rounded-md hover:bg-orange-600 disabled:opacity-50"
+                >
+                  {submitting ? '处理中...' : (batchResult && activeTab === 'batch' ? '重试失败链接' : '确认')}
+                </button>
+              )}
             </div>
           </form>
 
@@ -958,7 +1151,12 @@ export default function ProjectDetail() {
     setLoading(true)
     try {
       // console.log('🔄 正在获取项目内容:', projectId)
-      const url = `/api/contents/${projectId}${forceRefresh ? `?t=${Date.now()}` : ''}`
+      const base = `/api/contents/${projectId}`
+      const params = new URLSearchParams()
+      params.set('page', '1')
+      params.set('limit', '500')
+      if (forceRefresh) params.set('t', String(Date.now()))
+      const url = `${base}?${params.toString()}`
       const response = await fetch(url, {
         headers: {
           'x-user-id': '635595c4-4567-4d44-a21d-81d7a46d785c', // 临时使用固定用户ID
@@ -1007,11 +1205,23 @@ export default function ProjectDetail() {
         // 更新成功后重新获取数据
         await fetchProjectContents(id)
         console.log('✅ 数据更新成功')
+        // 添加成功提示
+        alert(`更新成功！\n共更新 ${result.data.success_count} 条，失败 ${result.data.failed_count} 条。`)
       } else {
-        console.error('❌ 数据更新失败:', result.error)
+        // 部分成功也可能是 207 状态码，fetch 不会抛出错误，但 json 中会有 success: true/false
+        // 如果后端返回 207，response.ok 可能为 true，视具体实现而定
+        // 这里处理明确的失败
+        if (response.status === 207) {
+            await fetchProjectContents(id)
+            alert(`部分更新完成\n成功 ${result.data.success_count} 条，失败 ${result.data.failed_count} 条。\n失败原因：\n${result.data.errors.slice(0, 5).join('\n')}${result.data.errors.length > 5 ? '\n...' : ''}`)
+        } else {
+            console.error('❌ 数据更新失败:', result.error)
+            alert(`更新失败: ${result.error}`)
+        }
       }
     } catch (error) {
       console.error('❌ 更新数据时发生错误:', error)
+      alert('更新过程中发生网络错误，请稍后重试。')
     } finally {
       setUpdating(false)
     }
@@ -1098,7 +1308,7 @@ export default function ProjectDetail() {
       '观看量': content.latest_stats?.view_count || 0,
       '点赞数': content.latest_stats?.like_count || 0,
       '收藏数': content.latest_stats?.bookmark_count || content.latest_stats?.favorite_count || 0,
-      '转发数': content.latest_stats?.share_count || content.latest_stats?.retweet_count || 0,
+      '分享数': content.latest_stats?.share_count || content.latest_stats?.retweet_count || 0,
       '评论数': content.latest_stats?.comment_count || 0,
       '互动率': content.latest_stats?.engagement_rate ? `${content.latest_stats.engagement_rate.toFixed(2)}%` : '0.00%',
       '监控状态': content.status === 'pending' ? '待处理' :
@@ -1194,6 +1404,19 @@ export default function ProjectDetail() {
         setCurrentProject(project)
         // 只使用 fetchProjectContents，不使用 store 中的 fetchContents
         fetchProjectContents(id)
+      } else if (!currentProject || currentProject.id !== id) {
+        setCurrentProject({
+          id,
+          user_id: '635595c4-4567-4d44-a21d-81d7a46d785c',
+          name: '内容项目',
+          platforms: ['youtube', 'tiktok', 'instagram', 'twitter'],
+          total_posts: 0,
+          total_views: 0,
+          status: 'active',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        fetchProjectContents(id)
       } else if (projects.length > 0) {
         // 如果找不到项目但有其他项目，重定向到第一个项目
         console.log('项目ID不存在，重定向到第一个可用项目')
@@ -1272,6 +1495,19 @@ export default function ProjectDetail() {
       return (num / 1000).toFixed(1) + 'K'
     }
     return num.toString()
+  }
+
+  const formatLikeCount = (content: Content) => {
+    if (content.latest_stats?.like_count_available === false) {
+      return '-'
+    }
+    return formatNumber(content.latest_stats?.like_count || 0)
+  }
+
+  const formatEngagementRate = (content: Content) => {
+    const rate = content.latest_stats?.engagement_rate ?? 0
+    const prefix = content.latest_stats?.like_count_available === false ? '≥' : ''
+    return `${prefix}${rate.toFixed(1)}%`
   }
 
   const formatDate = (dateString: string) => {
@@ -1372,7 +1608,18 @@ export default function ProjectDetail() {
           })))
 
           return (
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-6 mb-8">
+              <div className="bg-white rounded-lg shadow-sm p-6">
+                <div className="flex items-center">
+                  <Users className="h-8 w-8 text-gray-600" />
+                  <div className="ml-4">
+                    <p className="text-sm font-medium text-gray-600">内容数量</p>
+                    <p className="text-2xl font-bold text-gray-900">
+                      {realContents.length}
+                    </p>
+                  </div>
+                </div>
+              </div>
               <div className="bg-white rounded-lg shadow-sm p-6">
                 <div className="flex items-center">
                   <Eye className="h-8 w-8 text-blue-500" />
@@ -1496,6 +1743,34 @@ export default function ProjectDetail() {
                 <RefreshCw className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
                 {updating ? '更新中...' : '更新数据'}
               </button>
+              <button
+                onClick={async () => {
+                  if (!id) return
+                  setUpdating(true)
+                  try {
+                    const res = await fetch(`/api/contents/fix-creator-fields/${id}`, {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'x-user-id': '635595c4-4567-4d44-a21d-81d7a46d785c'
+                      }
+                    })
+                    await res.json()
+                    await fetchProjectContents(id, true)
+                  } catch {}
+                  finally { setUpdating(false) }
+                }}
+                disabled={updating || loading}
+                className={`inline-flex items-center px-3 py-2 border border-gray-300 rounded-md text-sm font-medium ${
+                  updating || loading
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+                title="回填达人账号/国家/粉丝数据"
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                回填达人信息
+              </button>
               <div className="border-l border-gray-300 h-6 mx-2"></div>
               <button
                 onClick={() => setViewMode('table')}
@@ -1565,7 +1840,7 @@ export default function ProjectDetail() {
                       收藏数
                     </th>
                     <th className="w-20 px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      转发数
+                      分享数
                     </th>
                     <th className="w-20 px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       互动率
@@ -1604,7 +1879,7 @@ export default function ProjectDetail() {
                       {formatNumber(content.latest_stats?.view_count || 0)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {formatNumber(content.latest_stats?.like_count || 0)}
+                      {formatLikeCount(content)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                       {formatNumber(content.latest_stats?.comment_count || 0)}
@@ -1616,7 +1891,7 @@ export default function ProjectDetail() {
                       {formatNumber(content.latest_stats?.share_count || content.latest_stats?.retweet_count || 0)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {content.latest_stats?.engagement_rate?.toFixed(1)}%
+                      {formatEngagementRate(content)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <StatusBadge status={content.status} />
@@ -1650,9 +1925,7 @@ export default function ProjectDetail() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {filteredContents.map((content) => (
               <div key={content.id} className="bg-white rounded-lg shadow-sm overflow-hidden flex flex-col">
-                <div className="flex justify-center p-4 bg-gray-50 h-48 items-center">
-                  <VideoThumbnail content={content} size="medium" />
-                </div>
+                <CardPreview content={content} />
                 <div className="p-4 flex-1">
                   <div className="flex items-center mb-2">
                     <PlatformIcon platform={content.platform} url={content.post_url} />
@@ -1684,14 +1957,14 @@ export default function ProjectDetail() {
                     </div>
                     <div>
                       <span className="text-gray-500">点赞数</span>
-                      <div className="font-medium">{formatNumber(content.latest_stats?.like_count || 0)}</div>
+                      <div className="font-medium">{formatLikeCount(content)}</div>
                     </div>
                     <div>
                       <span className="text-gray-500">收藏数</span>
                       <div className="font-medium">{formatNumber(content.latest_stats?.bookmark_count || content.latest_stats?.favorite_count || 0)}</div>
                     </div>
                     <div>
-                      <span className="text-gray-500">转发数</span>
+                      <span className="text-gray-500">分享数</span>
                       <div className="font-medium">{formatNumber(content.latest_stats?.share_count || content.latest_stats?.retweet_count || 0)}</div>
                     </div>
                     <div>
@@ -1700,7 +1973,7 @@ export default function ProjectDetail() {
                     </div>
                     <div>
                       <span className="text-gray-500">互动率</span>
-                      <div className="font-medium">{content.latest_stats?.engagement_rate?.toFixed(1)}%</div>
+                      <div className="font-medium">{formatEngagementRate(content)}</div>
                     </div>
                   </div>
                   <div className="mt-4 flex items-center justify-between">

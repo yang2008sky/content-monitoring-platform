@@ -35,10 +35,14 @@ export interface Content {
   id: string
   project_id: string
   post_url: string
-  platform: 'youtube' | 'tiktok' | 'instagram'
+  platform: 'youtube' | 'tiktok' | 'instagram' | 'twitter' | 'x'
   platform_id: string
   title?: string
   creator_name?: string
+  creator_username?: string
+  creator_profile_url?: string
+  creator_country?: string
+  creator_follower_count?: number
   creator_avatar?: string
   thumbnail_url?: string
   monitor_days: 30 | 60 | 90
@@ -51,6 +55,7 @@ export interface Content {
   latest_stats?: {
     view_count: number
     like_count: number
+    like_count_available?: boolean
     bookmark_count?: number
     favorite_count?: number
     comment_count: number
@@ -66,6 +71,7 @@ export interface ContentData {
   content_id: string
   view_count: number
   like_count: number
+  like_count_available?: boolean
   bookmark_count?: number
   favorite_count?: number
   comment_count: number

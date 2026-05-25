@@ -27,6 +27,9 @@ interface ContentItem {
   latest_stats: {
     view_count: number
     like_count: number
+    like_count_available?: boolean
+    bookmark_count?: number
+    favorite_count?: number
     comment_count: number
     share_count: number
     engagement_rate: number

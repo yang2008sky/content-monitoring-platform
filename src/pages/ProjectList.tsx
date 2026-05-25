@@ -1,14 +1,44 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { useProjectStore } from '../store/projectStore'
-import { Plus, FolderOpen, Calendar, BarChart3, Users, Youtube, Instagram, Twitter, Edit2, Trash2, MoreVertical, Download } from 'lucide-react'
+import { Plus, FolderOpen, Calendar, BarChart3, Users, Youtube, Instagram, Twitter, Edit2, Trash2, MoreVertical, Download, KeyRound, Link2 } from 'lucide-react'
 import { Project } from '../lib/supabase'
+
+const apiRecords = [
+  {
+    name: 'Scrape Creators',
+    address: 'https://api.scrapecreators.com',
+    apiKey: '************e4Ug'
+  }
+]
 
 // TikTok图标组件
 const TikTokIcon = ({ className }: { className?: string }) => (
   <svg className={className} viewBox="0 0 24 24" fill="currentColor">
     <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-.88-.05A6.33 6.33 0 0 0 5.16 20.5a6.33 6.33 0 0 0 10.86-4.43V7.83a8.24 8.24 0 0 0 4.77 1.52v-3.4a4.85 4.85 0 0 1-1.2-.26z"/>
   </svg>
+)
+
+const ApiRecordBar = () => (
+  <div className="hidden md:flex w-[500px] border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+    {apiRecords.map((record) => (
+      <div key={record.name} className="min-w-0">
+        <div className="font-medium leading-4 text-gray-900">{record.name}</div>
+        <span className="mt-1 flex min-w-0 items-center gap-3 leading-4">
+          <span className="flex min-w-0 items-center gap-1">
+            <Link2 className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+            <span className="shrink-0 text-gray-500">地址</span>
+            <span className="truncate font-mono text-gray-700" title={record.address}>{record.address}</span>
+          </span>
+          <span className="flex shrink-0 items-center gap-1">
+            <KeyRound className="h-3.5 w-3.5 text-amber-600" />
+            <span className="text-gray-500">API Key</span>
+            <span className="font-mono tracking-wider text-gray-700">{record.apiKey}</span>
+          </span>
+        </span>
+      </div>
+    ))}
+  </div>
 )
 
 // 从URL检测真实平台类型
@@ -302,7 +332,10 @@ export default function ProjectList() {
     for (const project of projects) {
       try {
         // 使用正确的 API 端点获取项目内容
-        const response = await fetch(`/api/contents/${project.id}`, {
+        const params = new URLSearchParams()
+        params.set('page', '1')
+        params.set('limit', '500')
+        const response = await fetch(`/api/contents/${project.id}?${params.toString()}`, {
           headers: {
             'x-user-id': '635595c4-4567-4d44-a21d-81d7a46d785c'
           }
@@ -436,7 +469,7 @@ export default function ProjectList() {
       {/* 顶部导航栏 */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
+          <div className="flex min-h-16 items-center justify-between gap-4 py-3">
             <div className="flex items-center">
               <div className="h-8 w-8 bg-blue-600 rounded-lg flex items-center justify-center mr-3">
                 <BarChart3 className="h-5 w-5 text-white" />
@@ -444,8 +477,9 @@ export default function ProjectList() {
               <h1 className="text-xl font-semibold text-gray-900">内容监控平台</h1>
             </div>
             
-            <div className="flex items-center space-x-4">
-              <div className="text-sm text-gray-600">
+            <div className="flex min-w-0 items-center gap-4">
+              <ApiRecordBar />
+              <div className="shrink-0 whitespace-nowrap text-sm text-gray-600">
                 内容监控管理系统
               </div>
             </div>

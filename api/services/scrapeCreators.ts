@@ -11,6 +11,7 @@ interface ScrapeCreatorsConfig {
 interface VideoStats {
   view_count: number
   like_count: number
+  like_count_available?: boolean
   bookmark_count?: number
   favorite_count?: number
   comment_count: number
@@ -53,6 +54,75 @@ class ScrapeCreatorsService {
 
   constructor(config: ScrapeCreatorsConfig) {
     this.config = config
+  }
+
+  private parseCount(...values: unknown[]): number {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.round(value)
+      }
+
+      const raw = String(value).trim()
+      if (!raw) continue
+
+      const normalized = raw
+        .replace(/,/g, '')
+        .replace(/\s+/g, '')
+        .toLowerCase()
+
+      const match = normalized.match(/([\d.]+)\s*([kmb万億亿]?)/)
+      if (!match) continue
+
+      const amount = Number.parseFloat(match[1])
+      if (!Number.isFinite(amount)) continue
+
+      const suffix = match[2]
+      const multiplier =
+        suffix === 'k' ? 1_000 :
+        suffix === 'm' ? 1_000_000 :
+        suffix === 'b' ? 1_000_000_000 :
+        suffix === '万' ? 10_000 :
+        suffix === '亿' || suffix === '億' ? 100_000_000 :
+        1
+
+      return Math.round(amount * multiplier)
+    }
+
+    return 0
+  }
+
+  private hasCount(...values: unknown[]): boolean {
+    return values.some((value) => value !== null && value !== undefined && value !== '')
+  }
+
+  private firstUrl(value: any): string {
+    if (!value) return ''
+    if (typeof value === 'string') return value
+    if (Array.isArray(value)) return value.find((item) => typeof item === 'string') || ''
+    if (Array.isArray(value.url_list)) return value.url_list.find((item: unknown) => typeof item === 'string') || ''
+    if (typeof value.url === 'string') return value.url
+    return ''
+  }
+
+  private normalizeContentUrl(url: string): string {
+    return url.trim().replace(/[，,。.\s]+$/g, '')
+  }
+
+  private proxyImageUrl(url: string): string {
+    return url ? `/api/proxy/image?url=${encodeURIComponent(url)}` : ''
+  }
+
+  private async getTikTokOembedThumbnail(url: string): Promise<string> {
+    try {
+      const response = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`)
+      if (!response.ok) return ''
+
+      const data = await response.json()
+      return typeof data.thumbnail_url === 'string' ? data.thumbnail_url : ''
+    } catch {
+      return ''
+    }
   }
 
   /**
@@ -112,7 +182,8 @@ class ScrapeCreatorsService {
    */
   async getVideoData(url: string): Promise<ScrapeCreatorsResponse> {
     try {
-      const platform = this.detectPlatform(url)
+      const cleanUrl = this.normalizeContentUrl(url)
+      const platform = this.detectPlatform(cleanUrl)
       if (!platform) {
         return {
           success: false,
@@ -120,12 +191,77 @@ class ScrapeCreatorsService {
         }
       }
 
-      const videoId = this.extractVideoId(url, platform)
+      const videoId = this.extractVideoId(cleanUrl, platform)
       if (!videoId) {
         return {
           success: false,
           error: '无法从URL中提取视频ID'
         }
+      }
+
+      // 无API Key的降级模式：尽量返回基础信息（优先支持 YouTube）
+      if (!this.config.apiKey) {
+        if (platform === 'youtube') {
+          try {
+            const oembed = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`)
+            if (oembed.ok) {
+              const info = await oembed.json()
+              const videoData: VideoData = {
+                id: videoId,
+                title: info.title || '未知标题',
+                description: '',
+                thumbnail_url: info.thumbnail_url || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+                published_at: new Date().toISOString(),
+                duration: 0,
+                creator: {
+                  name: info.author_name || '未知创作者',
+                  username: '',
+                  profile_url: '',
+                  country: '',
+                  avatar_url: '',
+                  follower_count: 0
+                },
+                stats: {
+                  view_count: 0,
+                  like_count: 0,
+                  comment_count: 0,
+                  share_count: 0,
+                  engagement_rate: 0
+                },
+                platform,
+                url: cleanUrl
+              }
+              return { success: true, data: videoData }
+            }
+          } catch {}
+        }
+        // 其他平台无法可靠获取，返回基础占位数据
+        const videoData: VideoData = {
+          id: videoId,
+          title: '未命名内容',
+          description: '',
+          thumbnail_url: platform === 'youtube' ? `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg` : '',
+          published_at: new Date().toISOString(),
+          duration: 0,
+          creator: {
+            name: '未知创作者',
+            username: '',
+            profile_url: '',
+            country: '',
+            avatar_url: '',
+            follower_count: 0
+          },
+          stats: {
+            view_count: 0,
+            like_count: 0,
+            comment_count: 0,
+            share_count: 0,
+            engagement_rate: 0
+          },
+          platform,
+          url: cleanUrl
+        }
+        return { success: true, data: videoData }
       }
 
       // 构建API请求 - 根据平台使用不同的端点
@@ -137,15 +273,15 @@ class ScrapeCreatorsService {
           break
         case 'tiktok':
           // TikTok 使用完整URL
-          apiUrl = `${this.config.baseUrl}/v1/tiktok/video?url=${encodeURIComponent(url)}`
+          apiUrl = `${this.config.baseUrl}/v2/tiktok/video?url=${encodeURIComponent(cleanUrl)}`
           break
         case 'instagram':
           // Instagram 使用完整URL
-          apiUrl = `${this.config.baseUrl}/v1/instagram/post?url=${encodeURIComponent(url)}`
+          apiUrl = `${this.config.baseUrl}/v1/instagram/post?url=${encodeURIComponent(cleanUrl)}`
           break
         case 'twitter':
           // Twitter 使用完整URL
-          apiUrl = `${this.config.baseUrl}/v1/twitter/tweet?url=${encodeURIComponent(url)}`
+          apiUrl = `${this.config.baseUrl}/v1/twitter/tweet?url=${encodeURIComponent(cleanUrl)}`
           break
         default:
           throw new Error(`不支持的平台: ${platform}`)
@@ -191,24 +327,31 @@ class ScrapeCreatorsService {
           }
         }
         
-        const itemInfo = data.itemInfo?.itemStruct || data.itemInfo || data
-        const stats = itemInfo.stats || itemInfo.statsV2 || {}
+        const itemInfo = data.aweme_detail || data.itemInfo?.itemStruct || data.itemInfo || data
+        const stats = itemInfo.statistics || itemInfo.stats || itemInfo.statsV2 || {}
         const author = itemInfo.author || {}
         const video = itemInfo.video || {}
-        
+        const authorStats = itemInfo.authorStats || author.stats || {}
+        const rawDuration = this.parseCount(video.duration, video.durationMs, video.duration_ms)
+        const apiThumbnailUrl = this.firstUrl(video.cover) ||
+          this.firstUrl(video.dynamicCover) ||
+          this.firstUrl(video.originCover)
+        const oembedThumbnailUrl = await this.getTikTokOembedThumbnail(cleanUrl)
 
 
         videoData = {
           id: videoId,
-          title: itemInfo.desc || '未知标题',
+          title: itemInfo.desc || itemInfo.description || '未知标题',
           description: itemInfo.desc,
-          thumbnail_url: video.cover || video.dynamicCover || video.originCover || '',
-          published_at: itemInfo.createTime ? new Date(itemInfo.createTime * 1000).toISOString() : new Date().toISOString(),
-          duration: video.duration || Math.round((video.durationMs || 0) / 1000),
+          thumbnail_url: this.proxyImageUrl(oembedThumbnailUrl || apiThumbnailUrl),
+          published_at: this.parseCount(itemInfo.createTime, itemInfo.create_time)
+            ? new Date(this.parseCount(itemInfo.createTime, itemInfo.create_time) * 1000).toISOString()
+            : new Date().toISOString(),
+          duration: rawDuration > 1000 ? Math.round(rawDuration / 1000) : rawDuration,
           creator: {
-            name: author.nickname || author.uniqueId || '未知创作者',
-            username: author.uniqueId || author.nickname || '',
-            profile_url: author.uniqueId ? `https://www.tiktok.com/@${author.uniqueId}` : '',
+            name: author.nickname || author.uniqueId || author.unique_id || '未知创作者',
+            username: author.uniqueId || author.unique_id || author.nickname || '',
+            profile_url: (author.uniqueId || author.unique_id) ? `https://www.tiktok.com/@${author.uniqueId || author.unique_id}` : '',
             country: author.region || 
                      author.country || 
                      author.location ||
@@ -216,34 +359,36 @@ class ScrapeCreatorsService {
                      itemInfo.region ||
                      itemInfo.country ||
                      '',
-            avatar_url: author.avatarLarger || author.avatarMedium || author.avatarThumb,
-            follower_count: parseInt(String(
+            avatar_url: this.firstUrl(author.avatarLarger) ||
+              this.firstUrl(author.avatar_larger) ||
+              this.firstUrl(author.avatarMedium) ||
+              this.firstUrl(author.avatar_medium) ||
+              this.firstUrl(author.avatarThumb) ||
+              this.firstUrl(author.avatar_thumb),
+            follower_count: this.parseCount(
               author.followerCount || 
               author.fans || 
               author.followersCount || 
               author.follower_count ||
               author.fanCount ||
-              author.stats?.followerCount ||
-              author.stats?.fans ||
-              itemInfo.authorStats?.followerCount ||
-              itemInfo.authorStats?.fans ||
-              '0'
-            ).replace(/[^\d]/g, '') || '0')
+              authorStats.followerCount ||
+              authorStats.follower_count ||
+              authorStats.fans
+            )
           },
           stats: {
-            view_count: parseInt(String(stats.playCount || '0')),
-            like_count: parseInt(String(stats.diggCount || '0')),
-            comment_count: parseInt(String(stats.commentCount || '0')),
-            share_count: parseInt(String(stats.shareCount || '0')),
+            view_count: this.parseCount(stats.playCount, stats.play_count, stats.viewCount, stats.view_count),
+            like_count: this.parseCount(stats.diggCount, stats.digg_count, stats.likeCount, stats.like_count),
+            bookmark_count: this.parseCount(stats.collectCount, stats.collect_count, stats.favoriteCount, stats.favorite_count, stats.bookmarkCount, stats.bookmark_count),
+            comment_count: this.parseCount(stats.commentCount, stats.comment_count),
+            share_count: this.parseCount(stats.shareCount, stats.share_count),
             engagement_rate: 0 // 稍后计算
           },
           platform,
-          url
+          url: cleanUrl
         }
       } else if (platform === 'instagram') {
-        // Instagram 特殊处理 - 添加详细调试日志
-        console.log('Instagram API 原始响应:', JSON.stringify(data, null, 2))
-        
+        // Instagram 特殊处理
         // 尝试多种可能的数据结构
         let shortcodeMedia = null
         let owner = null
@@ -262,49 +407,24 @@ class ScrapeCreatorsService {
         let likeCount = 0
         let commentCount = 0
         
-        // 检查不同的数据结构路径
-        console.log('检查数据结构:', {
-          hasXdtShortcodeMedia: !!data.xdt_shortcode_media,
-          hasGraphqlShortcodeMedia: !!data.graphql?.shortcode_media,
-          hasItems: !!data.items,
-          dataKeys: Object.keys(data)
-        })
-        
         // 修复：正确检查Instagram API响应结构
         if (data.data && data.data.xdt_shortcode_media) {
-          console.log('使用 data.xdt_shortcode_media 结构')
           shortcodeMedia = data.data.xdt_shortcode_media
         } else if (data.xdt_shortcode_media && typeof data.xdt_shortcode_media === 'object') {
-          console.log('使用 xdt_shortcode_media 结构')
           shortcodeMedia = data.xdt_shortcode_media
         } else if (data.graphql?.shortcode_media) {
-          console.log('使用 graphql.shortcode_media 结构')
           shortcodeMedia = data.graphql.shortcode_media
         } else if (data.data && typeof data.data === 'object') {
-          console.log('使用 data.data 结构')
           shortcodeMedia = data.data
         } else if (data.items && data.items[0]) {
-          console.log('使用 items[0] 结构')
           shortcodeMedia = data.items[0]
         } else {
-          console.log('使用根级数据结构')
           shortcodeMedia = data
         }
-        
-        console.log('解析的 shortcodeMedia 关键字段:', {
-          id: shortcodeMedia?.id,
-          typename: shortcodeMedia?.__typename,
-          hasOwner: !!shortcodeMedia?.owner,
-          ownerKeys: shortcodeMedia?.owner ? Object.keys(shortcodeMedia.owner) : [],
-          hasCaption: !!shortcodeMedia?.edge_media_to_caption,
-          captionCount: shortcodeMedia?.edge_media_to_caption?.edges?.length || 0
-        })
         
         if (shortcodeMedia) {
           // 提取用户信息 - 基于实际API响应结构
           owner = shortcodeMedia.owner || shortcodeMedia.user || {}
-          
-          console.log('原始 owner 数据:', JSON.stringify(owner, null, 2))
           
           // 如果owner为空，尝试从其他地方获取
           if (!owner.username && !owner.full_name) {
@@ -314,23 +434,10 @@ class ScrapeCreatorsService {
             }
           }
           
-          console.log('解析的 owner:', {
-            username: owner.username,
-            full_name: owner.full_name,
-            id: owner.id,
-            hasProfilePic: !!owner.profile_pic_url
-          })
-          
           // 提取标题和描述
           const edgeMediaToCaption = shortcodeMedia.edge_media_to_caption || {}
           const captionEdges = edgeMediaToCaption.edges || []
           const caption = captionEdges[0]?.node?.text || shortcodeMedia.caption?.text || shortcodeMedia.caption || ''
-          
-          console.log('Caption信息:', {
-            hasEdgeMediaToCaption: !!shortcodeMedia.edge_media_to_caption,
-            captionEdgesLength: captionEdges.length,
-            captionText: caption.substring(0, 100)
-          })
           
           if (caption) {
             const firstLine = caption.split('\n')[0].trim()
@@ -345,18 +452,10 @@ class ScrapeCreatorsService {
           // 提取媒体信息
           const originalThumbnailUrl = shortcodeMedia.display_url || shortcodeMedia.thumbnail_src || shortcodeMedia.image_versions2?.candidates?.[0]?.url || ''
           // 对于Instagram图片，使用代理URL解决CORS问题
-          thumbnailUrl = originalThumbnailUrl ? `http://localhost:3002/api/proxy/image?url=${encodeURIComponent(originalThumbnailUrl)}` : ''
+          thumbnailUrl = this.proxyImageUrl(originalThumbnailUrl)
           publishedAt = shortcodeMedia.taken_at_timestamp ? new Date(shortcodeMedia.taken_at_timestamp * 1000).toISOString() : 
                        shortcodeMedia.taken_at ? new Date(shortcodeMedia.taken_at * 1000).toISOString() : new Date().toISOString()
           duration = shortcodeMedia.video_duration || shortcodeMedia.video_versions?.[0]?.duration || 0
-          
-          console.log('媒体信息:', {
-            thumbnailUrl,
-            hasDisplayUrl: !!shortcodeMedia.display_url,
-            hasThumbnailSrc: !!shortcodeMedia.thumbnail_src,
-            hasImageVersions: !!shortcodeMedia.image_versions2,
-            duration
-          })
           
           // 提取创作者信息
           creatorName = owner.full_name || owner.username || owner.name || '未知创作者'
@@ -373,19 +472,6 @@ class ScrapeCreatorsService {
           followerCount = parseInt(String(owner.edge_followed_by?.count || owner.follower_count || '0'))
           
           // 提取统计信息
-          console.log('观看量字段调试:', {
-            video_view_count: shortcodeMedia.video_view_count,
-            view_count: shortcodeMedia.view_count,
-            play_count: shortcodeMedia.play_count,
-            video_play_count: shortcodeMedia.video_play_count,
-            clips_metadata_play_count: shortcodeMedia.clips_metadata?.play_count,
-            clips_metadata_view_count: shortcodeMedia.clips_metadata?.view_count,
-            hasVideoViewCount: !!shortcodeMedia.video_view_count,
-            hasViewCount: !!shortcodeMedia.view_count,
-            hasPlayCount: !!shortcodeMedia.play_count,
-            hasClipsMetadata: !!shortcodeMedia.clips_metadata
-          })
-          
           // 优先使用 video_play_count，它通常更准确
           viewCount = parseInt(String(
             shortcodeMedia.video_play_count || 
@@ -401,19 +487,9 @@ class ScrapeCreatorsService {
             shortcodeMedia.comment_count || 
             '0'
           ))
-          
-          console.log('提取的统计信息:', {
-            viewCount,
-            likeCount,
-            commentCount,
-            hasEdgeMediaPreviewLike: !!shortcodeMedia.edge_media_preview_like,
-            likeCountFromEdge: shortcodeMedia.edge_media_preview_like?.count
-          })
         }
         
-        console.log('最终解析结果:', {
-          title, creatorName, viewCount, likeCount, commentCount, thumbnailUrl
-        })
+        console.log('Instagram API parsed fields:', { id: videoId, viewCount, likeCount, commentCount })
         
         videoData = {
           id: videoId,
@@ -438,7 +514,7 @@ class ScrapeCreatorsService {
             engagement_rate: 0 // 稍后计算
           },
           platform,
-          url
+          url: cleanUrl
         }
       } else if (platform === 'twitter') {
         // Twitter 特殊处理
@@ -508,38 +584,27 @@ class ScrapeCreatorsService {
                      userLegacy.country ||
                      '',
             avatar_url: userResults.legacy?.profile_image_url_https || userLegacy.profile_image_url_https || userResults.avatar?.image_url || legacy.user?.profile_image_url_https || data.user?.profile_image_url_https,
-            follower_count: parseInt(String(userResults.legacy?.followers_count || userLegacy.followers_count || legacy.user?.followers_count || data.user?.followers_count || '0'))
+            follower_count: this.parseCount(userResults.legacy?.followers_count, userLegacy.followers_count, legacy.user?.followers_count, data.user?.followers_count)
           },
           stats: {
-            view_count: parseInt(String(views.count || '0')),
-            like_count: parseInt(String(legacy.favorite_count || '0')),
-            bookmark_count: parseInt(String(legacy.bookmark_count || '0')),
-            comment_count: parseInt(String(legacy.reply_count || '0')),
-            share_count: parseInt(String(legacy.retweet_count || '0')),
+            view_count: this.parseCount(views.count),
+            like_count: this.parseCount(legacy.favorite_count),
+            bookmark_count: this.parseCount(legacy.bookmark_count),
+            comment_count: this.parseCount(legacy.reply_count),
+            share_count: this.parseCount(legacy.retweet_count),
             engagement_rate: 0 // 稍后计算
           },
           platform,
-          url
+          url: cleanUrl
         }
       } else {
         // YouTube 和其他平台的处理
-        console.log('=== YouTube API 调试 ===')
-        console.log('Platform:', platform)
-        console.log('API URL被调用:', url)
-        console.log('Data keys:', Object.keys(data))
-        console.log('完整API响应:', JSON.stringify(data, null, 2))
-        console.log('检查订阅者相关字段:', {
-          'subscriberCountText': data.subscriberCountText,
-          'subscriberCount': data.subscriberCount,
-          'channel.subscriberCountText': data.channel?.subscriberCountText,
-          'channel.subscriberCount': data.channel?.subscriberCount,
-          'channel.subscribers': data.channel?.subscribers,
-          'country': data.country,
-          'channel.country': data.channel?.country,
-          'uploader.country': data.uploader?.country,
-          'author.country': data.author?.country
+        console.log('YouTube API parsed fields:', {
+          id: videoId,
+          hasViews: this.hasCount(data.viewCountInt, data.view_count, data.viewCount, data.views, data.viewCountText),
+          hasLikes: this.hasCount(data.likeCountInt, data.like_count, data.likeCount, data.likes, data.likeCountText),
+          hasComments: this.hasCount(data.commentCountInt, data.comment_count, data.commentCount, data.num_comments, data.comments, data.commentCountText)
         })
-        console.log('=== End YouTube Debug ===')
         
         videoData = {
           id: videoId,
@@ -564,7 +629,7 @@ class ScrapeCreatorsService {
                      data.location ||
                      '',
             avatar_url: data.channel?.avatar || data.avatar_img_channel || data.creator?.avatar || data.author?.avatar,
-            follower_count: parseInt(String(
+            follower_count: this.parseCount(
               data.subscriberCountText ||
               data.channel?.subscriberCountText ||
               data.channel?.subscribers || 
@@ -580,17 +645,18 @@ class ScrapeCreatorsService {
               data.uploader?.subscriber_count ||
               data.uploader?.subscribers ||
               '0'
-            ).replace(/[^\d]/g, '') || '0')
+            )
           },
           stats: {
-            view_count: data.viewCountInt || parseInt(String(data.views || data.view_count || data.viewCountText || '0').replace(/[^\d]/g, '')),
-            like_count: data.likeCountInt || parseInt(String(data.likes || data.like_count || data.likeCountText || '0').replace(/[^\d]/g, '')),
-            comment_count: data.commentCountInt || parseInt(String(data.num_comments || data.comment_count || data.comments || data.commentCountText || '0').replace(/[^\d]/g, '')),
-            share_count: parseInt(String(data.shares || data.share_count || '0').replace(/[^\d]/g, '')),
+            view_count: this.parseCount(data.viewCountInt, data.view_count, data.viewCount, data.views, data.viewCountText),
+            like_count: this.parseCount(data.likeCountInt, data.like_count, data.likeCount, data.likes, data.likeCountText),
+            like_count_available: this.hasCount(data.likeCountInt, data.like_count, data.likeCount, data.likes, data.likeCountText),
+            comment_count: this.parseCount(data.commentCountInt, data.comment_count, data.commentCount, data.num_comments, data.comments, data.commentCountText),
+            share_count: this.parseCount(data.shareCountInt, data.share_count, data.shareCount, data.shares, data.shareCountText),
             engagement_rate: 0 // 稍后计算
           },
           platform,
-          url
+          url: cleanUrl
         }
       }
 
@@ -599,6 +665,7 @@ class ScrapeCreatorsService {
         videoData.stats.like_count,
         videoData.stats.comment_count,
         videoData.stats.share_count,
+        videoData.stats.bookmark_count || videoData.stats.favorite_count || 0,
         videoData.stats.view_count
       )
 
@@ -619,9 +686,9 @@ class ScrapeCreatorsService {
   /**
    * 计算参与率
    */
-  private calculateEngagementRate(likes: number, comments: number, shares: number, views: number): number {
+  private calculateEngagementRate(likes: number, comments: number, shares: number, bookmarks: number, views: number): number {
     if (views === 0) return 0
-    const totalEngagement = likes + comments + shares
+    const totalEngagement = likes + comments + shares + bookmarks
     const rate = (totalEngagement / views) * 100
     // 限制参与率在0-9.9999之间，避免数据库溢出
     return Math.min(rate, 9.9999)

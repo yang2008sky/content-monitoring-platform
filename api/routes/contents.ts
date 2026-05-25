@@ -36,7 +36,25 @@ router.get('/:projectId', async (req, res) => {
       .single()
 
     if (!project) {
-      return res.status(404).json(formatError('项目不存在或无权限访问'))
+      const memoryContents = memoryStore.getProjectContents(projectId)
+      const stats = {
+        total_views: memoryContents.reduce((s, c) => s + (c.latest_stats?.view_count || 0), 0),
+        total_likes: memoryContents.reduce((s, c) => s + (c.latest_stats?.like_count || 0), 0),
+        total_comments: memoryContents.reduce((s, c) => s + (c.latest_stats?.comment_count || 0), 0),
+        total_shares: memoryContents.reduce((s, c) => s + (c.latest_stats?.share_count || 0), 0),
+        engagement_rate: memoryContents.length > 0
+          ? memoryContents.reduce((sum, c) => sum + (c.latest_stats?.engagement_rate || 0), 0) / memoryContents.length
+          : 0
+      }
+      return res.json(formatResponse({
+        contents: memoryContents,
+        stats,
+        pagination: {
+          page: parseInt(page as string),
+          limit: parseInt(limit as string),
+          total: memoryContents.length
+        }
+      }))
     }
 
     let query = supabase
@@ -46,6 +64,9 @@ router.get('/:projectId', async (req, res) => {
         content_data(
           view_count,
           like_count,
+          like_count_available,
+          bookmark_count,
+          favorite_count,
           comment_count,
           share_count,
           engagement_rate,
@@ -90,6 +111,9 @@ router.get('/:projectId', async (req, res) => {
         latest_stats: {
           view_count: latestData.view_count || 0,
           like_count: latestData.like_count || 0,
+          like_count_available: latestData.like_count_available,
+          bookmark_count: latestData.bookmark_count || 0,
+          favorite_count: latestData.favorite_count || 0,
           comment_count: latestData.comment_count || 0,
           share_count: latestData.share_count || 0,
           engagement_rate: latestData.engagement_rate || 0,
@@ -152,7 +176,8 @@ router.post('/:projectId', async (req, res) => {
       .single()
 
     if (!project) {
-      return res.status(404).json(formatError('项目不存在或无权限访问'))
+      console.log('项目在数据库中未找到，启用本地导入模式')
+      // 进入后续流程，导入数据将直接写入内存存储
     }
 
     // 自动检测平台或使用强制指定的平台
@@ -227,7 +252,7 @@ router.post('/:projectId/batch', upload.single('file'), async (req, res) => {
       .single()
 
     if (!project) {
-      return res.status(404).json(formatError('项目不存在或无权限访问'))
+      console.log('项目不存在或无权限访问，开启本地批量导入模式')
     }
 
     // 解析Excel文件
@@ -355,6 +380,7 @@ router.post('/:projectId/batch', upload.single('file'), async (req, res) => {
 // 批量添加链接
 router.post('/:projectId/batch-links', async (req, res) => {
   try {
+    console.log('🧪 batch-links route invoked')
     const userId = req.headers['x-user-id'] as string
     const { projectId } = req.params
     const { links } = req.body
@@ -380,7 +406,7 @@ router.post('/:projectId/batch-links', async (req, res) => {
       .single()
 
     if (!project) {
-      return res.status(404).json(formatError('项目不存在或无权限访问'))
+      console.log('项目不存在或无权限访问，启用本地批量导入模式')
     }
 
     const successRows: any[] = []
@@ -450,6 +476,10 @@ router.post('/:projectId/batch-links', async (req, res) => {
         let contentStatus = 'pending'
         let title = null
         let creatorName = null
+        let creatorUsername = null
+        let creatorProfileUrl = null
+        let creatorCountry = null
+        let creatorFollowerCount: number | null = null
         let creatorAvatar = null
         let thumbnailUrl = null
         let publishedAt = null
@@ -463,15 +493,30 @@ router.post('/:projectId/batch-links', async (req, res) => {
             contentStatus = 'monitoring'
             title = videoData.title
             creatorName = videoData.creator.name
+            creatorUsername = videoData.creator.username || null
+            creatorProfileUrl = videoData.creator.profile_url || null
+            creatorCountry = videoData.creator.country || null
+            creatorFollowerCount = typeof videoData.creator.follower_count === 'number' ? videoData.creator.follower_count : null
             creatorAvatar = videoData.creator.avatar_url
             thumbnailUrl = videoData.thumbnail_url
             publishedAt = videoData.published_at
             console.log(`✅ 成功获取视频数据: ${title}`)
           } else {
             console.log(`⚠️ 无法获取视频数据: ${videoResult.error}`)
+            // 即使抓取失败，也允许添加链接，状态设为 pending 或 error
+            // 这样用户可以稍后重试，或者手动补充信息
+            contentStatus = 'pending'
+            title = `未命名视频 (${platformId})` // 给一个默认标题
+            
+            // 如果是因为视频不存在或隐私设置，我们仍然允许添加，但标记状态
+            // failedRows.push({ ... }) // 不再直接失败
+            // continue // 不再跳过
           }
         } catch (error) {
           console.log(`❌ 获取视频数据时发生错误: ${error}`)
+          // 发生异常时也允许继续，作为待处理项
+          contentStatus = 'pending'
+          title = `未命名视频 (${platformId})`
         }
 
         // 临时解决方案：如果是 Twitter，尝试插入，如果失败则使用兼容的平台值
@@ -480,8 +525,12 @@ router.post('/:projectId/batch-links', async (req, res) => {
           post_url: postUrl,
           platform: detectedPlatform,
           platform_id: platformId,
-          title: title,
+          title: title ? (title.length > 500 ? title.substring(0, 497) + '...' : title) : title,
           creator_name: creatorName,
+          creator_username: creatorUsername,
+          creator_profile_url: creatorProfileUrl,
+          creator_country: creatorCountry,
+          creator_follower_count: creatorFollowerCount,
           creator_avatar: creatorAvatar,
           thumbnail_url: thumbnailUrl,
           monitor_days: 30, // 默认监控30天
@@ -494,6 +543,31 @@ router.post('/:projectId/batch-links', async (req, res) => {
           .insert(insertData)
           .select()
           .single()
+
+        // 如果数据库缺少新字段（creator_country等），尝试不带这些字段插入
+        if (error && (error.message?.includes('creator_country') || error.message?.includes('schema cache'))) {
+          console.log('⚠️ 数据库缺少新字段，尝试兼容模式插入...')
+          const { 
+            creator_country, 
+            creator_username, 
+            creator_profile_url, 
+            creator_follower_count, 
+            ...compatibleData 
+          } = insertData as any
+          
+          const { data: retryContent, error: retryError } = await supabase
+            .from('contents')
+            .insert(compatibleData)
+            .select()
+            .single()
+          
+          content = retryContent
+          error = retryError
+          
+          if (!retryError) {
+            console.log('✅ 内容已成功保存（兼容模式）')
+          }
+        }
 
         // 如果是 Twitter 约束错误，尝试使用 'instagram' 作为临时平台类型
         if (error && error.message?.includes('contents_platform_check') && detectedPlatform === 'twitter') {
@@ -515,11 +589,45 @@ router.post('/:projectId/batch-links', async (req, res) => {
         }
 
         if (error) {
-          console.error(`数据库插入失败 (${postUrl}):`, error)
-          failedRows.push({
+          const now = new Date().toISOString()
+          const localId = crypto.randomUUID()
+          memoryStore.addContent(projectId, {
+            id: localId,
+            project_id: projectId,
+            post_url: postUrl,
+            platform: detectedPlatform,
+            platform_id: platformId,
+            title: title || `未命名视频 (${platformId})`,
+            creator_name: creatorName || '',
+            creator_username: creatorUsername || '',
+            creator_profile_url: creatorProfileUrl || '',
+            creator_country: creatorCountry || '',
+            creator_follower_count: creatorFollowerCount || 0,
+            creator_avatar: creatorAvatar || '',
+            thumbnail_url: thumbnailUrl || '',
+            monitor_days: 30,
+            region: '',
+            remark: '',
+            status: contentStatus,
+            published_at: publishedAt || now,
+            created_at: now,
+            updated_at: now,
+            latest_stats: {
+              view_count: videoData?.stats?.view_count || 0,
+              like_count: videoData?.stats?.like_count || 0,
+              like_count_available: videoData?.stats?.like_count_available,
+              bookmark_count: videoData?.stats?.bookmark_count || 0,
+              favorite_count: videoData?.stats?.favorite_count || 0,
+              comment_count: videoData?.stats?.comment_count || 0,
+              share_count: videoData?.stats?.share_count || 0,
+              engagement_rate: videoData?.stats?.engagement_rate || 0,
+              collected_at: now
+            }
+          })
+          successRows.push({
             index: linkIndex,
             link: link,
-            error: `数据库插入失败: ${error.message || error.code || '未知错误'}`
+            data: { id: localId }
           })
           continue
         }
@@ -532,6 +640,9 @@ router.post('/:projectId/batch-links', async (req, res) => {
               content_id: content.id,
               view_count: videoData.stats.view_count,
               like_count: videoData.stats.like_count,
+              like_count_available: videoData.stats.like_count_available,
+              bookmark_count: videoData.stats.bookmark_count,
+              favorite_count: videoData.stats.favorite_count,
               comment_count: videoData.stats.comment_count,
               share_count: videoData.stats.share_count,
               engagement_rate: videoData.stats.engagement_rate,
@@ -560,6 +671,7 @@ router.post('/:projectId/batch-links', async (req, res) => {
       }
     }
 
+    console.log('批量添加准备返回', { success_count: successRows.length, failed_count: failedRows.length })
     res.json(formatResponse({
       success_count: successRows.length,
       failed_count: failedRows.length,
@@ -726,7 +838,7 @@ router.post('/update-all/:projectId', async (req, res) => {
       .single()
 
     if (!project) {
-      return res.status(404).json(formatError('项目不存在或无权限访问'))
+      console.log('项目不存在或无权限访问，启用本地批量导入模式')
     }
 
     // 获取项目下所有内容
@@ -751,42 +863,46 @@ router.post('/update-all/:projectId', async (req, res) => {
     // 批量更新每个内容的数据
     for (const content of contents) {
       try {
-        // 这里应该调用实际的数据抓取服务
-        // 目前先模拟更新数据
-        const mockStats = {
-          view_count: Math.floor(Math.random() * 100000) + 10000,
-          like_count: Math.floor(Math.random() * 5000) + 500,
-          comment_count: Math.floor(Math.random() * 500) + 50,
-          share_count: Math.floor(Math.random() * 200) + 20,
-        }
+        console.log(`正在更新内容: ${content.title} (${content.post_url})`)
+        
+        // 调用实际的数据抓取服务
+        const videoResult = await scrapeCreatorsService.getVideoData(content.post_url)
+        
+        if (videoResult.success && videoResult.data && videoResult.data.stats) {
+          const stats = videoResult.data.stats
+          
+          // 插入新的统计数据
+          const { error: insertError } = await supabase
+            .from('content_data')
+            .insert({
+              content_id: content.id,
+              view_count: stats.view_count,
+              like_count: stats.like_count,
+              bookmark_count: stats.bookmark_count,
+              favorite_count: stats.favorite_count,
+              comment_count: stats.comment_count,
+              share_count: stats.share_count,
+              engagement_rate: stats.engagement_rate,
+              collected_at: new Date().toISOString()
+            })
 
-        const engagement_rate = calculateEngagementRate(
-          mockStats.view_count,
-          mockStats.like_count,
-          mockStats.comment_count,
-          mockStats.share_count
-        )
-
-        // 插入新的统计数据
-        const { error: insertError } = await supabase
-          .from('content_data')
-          .insert({
-            content_id: content.id,
-            view_count: mockStats.view_count,
-            like_count: mockStats.like_count,
-            comment_count: mockStats.comment_count,
-            share_count: mockStats.share_count,
-            engagement_rate: engagement_rate,
-            collected_at: new Date().toISOString()
-          })
-
-        if (insertError) {
-          console.error(`更新内容 ${content.id} 数据失败:`, insertError)
-          failedCount++
-          errors.push(`内容 "${content.title}" 更新失败`)
+          if (insertError) {
+            console.error(`更新内容 ${content.id} 数据失败:`, insertError)
+            failedCount++
+            errors.push(`内容 "${content.title}" 更新失败: 数据库写入错误`)
+          } else {
+            successCount++
+            console.log(`✅ 内容更新成功: ${content.title}`)
+          }
         } else {
-          successCount++
+          console.error(`获取视频数据失败 (${content.post_url}):`, videoResult.error)
+          failedCount++
+          errors.push(`内容 "${content.title}" 获取数据失败: ${videoResult.error || '未知错误'}`)
         }
+        
+        // 添加短暂延时，避免触发反爬虫限制
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        
       } catch (error) {
         console.error(`处理内容 ${content.id} 时发生错误:`, error)
         failedCount++
@@ -828,59 +944,50 @@ router.get('/export/:projectId', async (req, res) => {
       return res.status(401).json(formatError('用户未认证'))
     }
 
-    let contents: any[] = []
-    let projectName = queryProjectName as string || '未知项目'
+    let projectName = (queryProjectName as string) || '未知项目'
 
-    // 首先尝试从内存存储获取数据
-    const memoryContents = memoryStore.getProjectContents(projectId)
-    if (memoryContents && memoryContents.length > 0) {
-      console.log(`从内存存储获取到 ${memoryContents.length} 个内容`)
-      contents = memoryContents
-      console.log('使用项目名称:', projectName)
-    } else {
-      // 如果内存中没有数据，尝试从数据库获取
-      console.log('内存中没有数据，尝试从数据库获取')
-      
-      // 验证项目所有权
-      const { data: project } = await supabase
-        .from('projects')
-        .select('id, name')
-        .eq('id', projectId)
-        .eq('user_id', userId)
-        .single()
+    const { data: project } = await supabase
+      .from('projects')
+      .select('id, name')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .single()
 
-      if (!project) {
-        return res.status(404).json(formatError('项目不存在或无权限访问'))
-      }
+    if (!project) {
+      console.log('项目不存在，改为返回本地更新结果：0')
+      return res.json(formatResponse({ 
+        total_count: 0,
+        success_count: 0,
+        failed_count: 0,
+        errors: []
+      }, '没有需要更新的内容'))
+    }
+    projectName = project.name
 
-      projectName = project.name
+    const { data: contents, error } = await supabase
+      .from('contents')
+      .select(`
+        *,
+        content_data(
+          view_count,
+          like_count,
+          like_count_available,
+          bookmark_count,
+          favorite_count,
+          comment_count,
+          share_count,
+          engagement_rate,
+          collected_at
+        )
+      `)
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
 
-      // 获取项目的所有内容数据
-      const { data: dbContents, error } = await supabase
-        .from('contents')
-        .select(`
-          *,
-          content_data(
-            view_count,
-            like_count,
-            comment_count,
-            share_count,
-            engagement_rate,
-            collected_at
-          )
-        `)
-        .eq('project_id', projectId)
-        .order('created_at', { ascending: false })
-
-      if (error) {
-        console.error('获取内容列表失败:', error)
-        return res.status(500).json(formatError('获取内容列表失败'))
-      }
-
-      contents = dbContents || []
+    if (error) {
+      return res.status(500).json(formatError('获取内容列表失败'))
     }
 
-    if (contents.length === 0) {
+    if (!contents || contents.length === 0) {
       return res.status(404).json(formatError('项目中没有内容数据'))
     }
 
@@ -907,7 +1014,7 @@ router.get('/export/:projectId', async (req, res) => {
         '观看量': latestData.view_count || 0,
         '点赞数': latestData.like_count || 0,
         '收藏数': latestData.bookmark_count || latestData.favorite_count || 0,
-        '转发数': latestData.share_count || latestData.retweet_count || 0,
+        '分享数': latestData.share_count || latestData.retweet_count || 0,
         '评论数': latestData.comment_count || 0,
         '互动率': latestData.engagement_rate ? `${latestData.engagement_rate.toFixed(2)}%` : '0.00%',
         '监控状态': content.status === 'pending' ? '待处理' :
@@ -939,7 +1046,7 @@ router.get('/export/:projectId', async (req, res) => {
       { wch: 12 }, // 观看量
       { wch: 10 }, // 点赞数
       { wch: 10 }, // 收藏数
-      { wch: 10 }, // 转发数
+      { wch: 10 }, // 分享数
       { wch: 10 }, // 评论数
       { wch: 10 }, // 互动率
       { wch: 12 }, // 监控状态
@@ -966,6 +1073,96 @@ router.get('/export/:projectId', async (req, res) => {
   } catch (error) {
     console.error('导出Excel错误:', error)
     res.status(500).json(formatError('导出失败'))
+  }
+})
+
+// 回填缺失的达人字段
+router.post('/fix-creator-fields/:projectId', async (req, res) => {
+  try {
+    const userId = req.headers['x-user-id'] as string
+    const { projectId } = req.params
+
+    if (!userId) {
+      return res.status(401).json(formatError('用户未认证'))
+    }
+
+    const { data: project } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .eq('user_id', userId)
+      .single()
+
+    if (!project) {
+      return res.status(404).json(formatError('项目不存在或无权限访问'))
+    }
+
+    const { data: contents, error } = await supabase
+      .from('contents')
+      .select('*')
+      .eq('project_id', projectId)
+
+    if (error) {
+      return res.status(500).json(formatError('获取内容列表失败'))
+    }
+
+    if (!contents || contents.length === 0) {
+      return res.json(formatResponse({ updated_count: 0 }, '没有需要回填的内容'))
+    }
+
+    let updated = 0
+    let skipped = 0
+    let failed = 0
+    const errors: string[] = []
+
+    // 逐条处理，避免第三方限流
+    for (const content of contents) {
+      const needFix = !content.creator_profile_url || !content.creator_username || (!content.creator_follower_count || content.creator_follower_count === 0)
+      if (!needFix) {
+        skipped++
+        continue
+      }
+
+      try {
+        const result = await scrapeCreatorsService.getVideoData(content.post_url)
+        if (result.success && result.data) {
+          const c = result.data.creator
+          const { error: updError } = await supabase
+            .from('contents')
+            .update({
+              title: result.data.title || content.title,
+              creator_name: c.name || content.creator_name,
+              creator_username: c.username || content.creator_username,
+              creator_profile_url: c.profile_url || content.creator_profile_url,
+              creator_country: c.country || content.creator_country,
+              creator_follower_count: typeof c.follower_count === 'number' ? c.follower_count : content.creator_follower_count,
+              creator_avatar: c.avatar_url || content.creator_avatar,
+              thumbnail_url: result.data.thumbnail_url || content.thumbnail_url,
+              published_at: result.data.published_at || content.published_at,
+              status: 'monitoring'
+            })
+            .eq('id', content.id)
+
+          if (updError) {
+            failed++
+            errors.push(`更新失败: ${content.id}`)
+          } else {
+            updated++
+          }
+        } else {
+          failed++
+          errors.push(`抓取失败: ${content.id}`)
+        }
+      } catch (e) {
+        failed++
+        errors.push(`异常: ${content.id}`)
+      }
+    }
+
+    return res.json(formatResponse({ updated, skipped, failed, total: contents.length, errors }, '达人字段回填完成'))
+  } catch (error) {
+    console.error('回填达人字段错误:', error)
+    res.status(500).json(formatError('服务器内部错误'))
   }
 })
 

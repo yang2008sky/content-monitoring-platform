@@ -124,6 +124,120 @@ router.post('/fetch-batch', async (req: Request, res: Response): Promise<void> =
 })
 
 /**
+ * 批量添加内容到项目（本地友好模式）
+ * POST /api/content/batch-add
+ */
+router.post('/batch-add', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { project_id, links } = req.body as { project_id: string, links: string[] }
+    if (!project_id || !Array.isArray(links) || links.length === 0) {
+      res.status(400).json({ success: false, error: '项目ID和链接数组是必需的' })
+      return
+    }
+    if (links.length > 500) {
+      res.status(400).json({ success: false, error: '一次最多只能添加500个链接' })
+      return
+    }
+    const success_rows: any[] = []
+    const failed_rows: any[] = []
+    for (let i = 0; i < links.length; i++) {
+      const link = links[i]?.trim()
+      const index = i + 1
+      if (!link) {
+        failed_rows.push({ index, link, error: '链接为空' })
+        continue
+      }
+      try {
+        const result = await scrapeCreatorsService.getVideoData(link)
+        if (!result.success || !result.data) {
+          failed_rows.push({ index, link, error: result.error || '无法获取视频数据' })
+          continue
+        }
+        const data = result.data
+        const content = {
+          id: randomUUID(),
+          project_id,
+          post_url: link,
+          platform: data.platform,
+          platform_id: data.id,
+          title: data.title,
+          creator_name: data.creator.name,
+          creator_username: data.creator.username || '',
+          creator_profile_url: data.creator.profile_url || '',
+          creator_country: data.creator.country || '',
+          creator_follower_count: data.creator.follower_count || 0,
+          creator_avatar: data.creator.avatar_url || '',
+          thumbnail_url: data.thumbnail_url || '',
+          monitor_days: 60,
+          region: '',
+          remark: '',
+          status: 'monitoring' as const,
+          published_at: data.published_at,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          latest_stats: {
+            view_count: data.stats.view_count,
+            like_count: data.stats.like_count,
+            like_count_available: data.stats.like_count_available,
+            bookmark_count: data.stats.bookmark_count,
+            favorite_count: data.stats.favorite_count,
+            comment_count: data.stats.comment_count,
+            share_count: data.stats.share_count,
+            engagement_rate: data.stats.engagement_rate,
+            collected_at: new Date().toISOString()
+          }
+        }
+        memoryStore.addContent(project_id, content)
+        // 尝试保存到数据库，但即使失败也不影响响应
+        try {
+          const { error: dbErr } = await supabase.from('contents').insert({
+            id: content.id,
+            project_id: content.project_id,
+            post_url: content.post_url,
+            platform: content.platform,
+            platform_id: content.platform_id,
+            title: content.title,
+            creator_name: content.creator_name,
+            creator_username: content.creator_username,
+            creator_profile_url: content.creator_profile_url,
+            creator_country: content.creator_country,
+            creator_follower_count: content.creator_follower_count,
+            creator_avatar: content.creator_avatar,
+            thumbnail_url: content.thumbnail_url,
+            monitor_days: content.monitor_days,
+            region: content.region,
+            remark: content.remark,
+            status: content.status,
+            published_at: content.published_at,
+            created_at: content.created_at,
+            updated_at: content.updated_at
+          })
+          if (dbErr) console.warn('数据库保存失败(批量):', dbErr.message || dbErr)
+        } catch (e) {
+          console.warn('数据库保存异常(批量):', e)
+        }
+        success_rows.push({ index, link, data: { id: content.id } })
+      } catch (e) {
+        failed_rows.push({ index, link, error: '处理链接时发生错误' })
+      }
+    }
+    res.json({
+      success: true,
+      data: {
+        success_count: success_rows.length,
+        failed_count: failed_rows.length,
+        success_rows,
+        failed_rows
+      },
+      message: `批量添加完成：成功 ${success_rows.length} 条，失败 ${failed_rows.length} 条`
+    })
+  } catch (error) {
+    console.error('批量添加失败:', error)
+    res.status(500).json({ success: false, error: '批量添加失败' })
+  }
+})
+
+/**
  * 添加内容到项目
  * POST /api/content/add
  */
@@ -170,6 +284,23 @@ router.post('/add', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
+    // 使用数据库进行重复校验
+    const platformId = videoResult.data.id
+    const { data: existingInDB } = await supabase
+      .from('contents')
+      .select('id')
+      .eq('project_id', project_id)
+      .eq('platform_id', platformId)
+      .single()
+
+    if (existingInDB) {
+      res.status(400).json({
+        success: false,
+        error: '内容已存在（根据平台ID去重）'
+      })
+      return
+    }
+
     // 构建内容对象
     const content = {
       id: randomUUID(),
@@ -195,6 +326,9 @@ router.post('/add', async (req: Request, res: Response): Promise<void> => {
       latest_stats: {
         view_count: videoResult.data.stats.view_count,
         like_count: videoResult.data.stats.like_count,
+        like_count_available: videoResult.data.stats.like_count_available,
+        bookmark_count: videoResult.data.stats.bookmark_count,
+        favorite_count: videoResult.data.stats.favorite_count,
         comment_count: videoResult.data.stats.comment_count,
         share_count: videoResult.data.stats.share_count,
         engagement_rate: videoResult.data.stats.engagement_rate,
@@ -217,6 +351,10 @@ router.post('/add', async (req: Request, res: Response): Promise<void> => {
           platform_id: content.platform_id,
           title: content.title,
           creator_name: content.creator_name,
+          creator_username: content.creator_username,
+          creator_profile_url: content.creator_profile_url,
+          creator_country: content.creator_country,
+          creator_follower_count: content.creator_follower_count,
           creator_avatar: content.creator_avatar,
           thumbnail_url: content.thumbnail_url,
           monitor_days: content.monitor_days,
@@ -241,6 +379,9 @@ router.post('/add', async (req: Request, res: Response): Promise<void> => {
             content_id: content.id,
             view_count: content.latest_stats.view_count,
             like_count: content.latest_stats.like_count,
+            like_count_available: content.latest_stats.like_count_available,
+            bookmark_count: content.latest_stats.bookmark_count,
+            favorite_count: content.latest_stats.favorite_count,
             comment_count: content.latest_stats.comment_count,
             share_count: content.latest_stats.share_count,
             engagement_rate: content.latest_stats.engagement_rate,
@@ -294,6 +435,9 @@ router.post('/update-stats/:contentId', async (req: Request, res: Response): Pro
       const updatedStats = {
         view_count: result.data.stats.view_count,
         like_count: result.data.stats.like_count,
+        like_count_available: result.data.stats.like_count_available,
+        bookmark_count: result.data.stats.bookmark_count,
+        favorite_count: result.data.stats.favorite_count,
         comment_count: result.data.stats.comment_count,
         share_count: result.data.stats.share_count,
         engagement_rate: result.data.stats.engagement_rate,
